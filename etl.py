@@ -77,19 +77,81 @@ def determine_rebound_type(play: pd.Series, pbp_df: pd.DataFrame, last_possessio
                 (
                     (pbp_df["homedescription"].str.contains("MISS", na=False)) |
                     (pbp_df["visitordescription"].str.contains("MISS", na=False)) 
+                ) &
+                (
+                    (pbp_df["homedescription"].str.contains("1 of 1", na=False)) |
+                    (pbp_df["visitordescription"].str.contains("1 of 1", na=False)) |
+                    (pbp_df["homedescription"].str.contains("2 of 2", na=False)) |
+                    (pbp_df["visitordescription"].str.contains("2 of 2", na=False)) |
+                    (pbp_df["homedescription"].str.contains("3 of 3", na=False)) |
+                    (pbp_df["visitordescription"].str.contains("3 of 3", na=False))
                 )
             )
         )
-    ].sort_values("eventnum").iloc[-1]
+    ].sort_values("eventnum")
+    if len(shot) > 0:
+        shot = shot.iloc[-1]
+    else:
+        return False, 0
+
+    # We need to account for missed free throws either containing
+    # a made field-goal (And 1) or prior made free throw(s) by
+    # the same player at the same time
+    if shot["eventmsgtype"] == 3:
+        poss_df = pbp_df[
+            (
+                pbp_df["eventnum"] > last_possession
+            ) &
+            (
+                pbp_df["eventnum"] < rebound_event
+            )
+        ]
+        made_shot_df = poss_df[
+            (
+                poss_df["eventmsgtype"]==1
+            ) &
+            (
+                poss_df["player1_id"] == shot["player1_id"]
+            )
+        ]
+        if len(made_shot_df) > 0:
+            made_shot = made_shot_df.iloc[-1]
+            if ("3PT" in str(made_shot["homedescription"])) or ("3PT" in str(made_shot["visitordescription"])):
+                points = 3
+            else:
+                points = 2
+        else:
+            # Need to account for previous made free throws
+            made_free_throw_df = poss_df[
+            (
+                poss_df["eventmsgtype"]==3
+            ) &
+            (
+                poss_df["player1_id"] == shot["player1_id"]
+            ) &
+            (
+                (
+                    ~poss_df["homedescription"].str.contains("MISS", na=False)
+                ) &
+                (
+                    ~poss_df["visitordescription"].str.contains("MISS", na=False)
+                )
+            )
+        ]
+            points = len(made_free_throw_df)
+    else:
+        points = 0
+
+        
 
     # This is a defensive rebound if the rebounding team ID
     # does not equal the offensive team ID
     def_rebound = shot["player1_team_id"] != play["player1_team_id"]
 
-    return def_rebound
+    return def_rebound, points
 
 
-def create_rebound_play(play: pd.Series, home_id: int):
+def create_rebound_play(play: pd.Series, home_id: int, points: int):
     """ This helper function allocates the team
     rebounding the ball over to the defense, the
     other team to the offense, and points to zero
@@ -99,6 +161,8 @@ def create_rebound_play(play: pd.Series, home_id: int):
             individual play
         home_id (int): Integer identifier for the home
             team
+        points (int): Number of points scored on the
+            possession
 
     Returns:
         play_df (pd.DataFrame): One-row DataFrame
@@ -115,7 +179,7 @@ def create_rebound_play(play: pd.Series, home_id: int):
         def_prefix = "visitor_"
     
     # Initialize play DataFrame with 0 points
-    play_df = pd.DataFrame({"points": [0], "eventnum": [play["eventnum"]]})
+    play_df = pd.DataFrame({"points": [points], "eventnum": [play["eventnum"]]})
 
     # Loop through to add 
     for player_number in range(1, 6):
@@ -162,9 +226,9 @@ def isolate_possessions(pbp_df: pd.DataFrame, game_id: int):
         # This is a rebound, but only defensive rebounds end
         # possessions, so we need to identify those
         elif row["eventmsgtype"] == 4:
-            def_rebound = determine_rebound_type(row, pbp_df, last_possession)
+            def_rebound, points = determine_rebound_type(row, pbp_df, last_possession)
             if def_rebound:
-                play_df = create_rebound_play(row, home_id)
+                play_df = create_rebound_play(row, home_id, points)
                 last_possession = row["eventnum"]
                 poss_df = pd.concat([poss_df, play_df])
 
