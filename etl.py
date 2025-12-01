@@ -379,7 +379,7 @@ def isolate_possessions(pbp_df: pd.DataFrame, game_id: int):
     """
 
     # Initialize possession DataFrame
-    poss_df = pd.DataFrame()
+    poss_df = pd.DataFrame(columns=["eventnum"])
     last_possession = 0
 
     # Pull game information
@@ -403,7 +403,7 @@ def isolate_possessions(pbp_df: pd.DataFrame, game_id: int):
             if def_rebound:
                 play_df = create_rebound_play(row, home_id, visitor_id, points)
                 last_possession = row["eventnum"]
-                poss_df = poss_df[poss_df["event_num"] != remove_shot]
+                poss_df = poss_df[poss_df["eventnum"] != remove_shot]
                 poss_df = pd.concat([poss_df, play_df])
 
             # Reset rebound boolean
@@ -412,7 +412,7 @@ def isolate_possessions(pbp_df: pd.DataFrame, game_id: int):
             points, remove_shot = determine_scoring_type(row, pbp_df, last_possession)
             play_df = create_scoring_play(row, home_id, visitor_id, points)
             last_possession = row["eventnum"]
-            poss_df = poss_df[poss_df["event_num"] != remove_shot]
+            poss_df = poss_df[poss_df["eventnum"] != remove_shot]
             poss_df = pd.concat([poss_df, play_df])
 
     return poss_df
