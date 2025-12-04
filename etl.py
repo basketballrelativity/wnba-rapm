@@ -8,6 +8,7 @@ points accordingly
 import pandas as pd
 
 import data
+import utils
 
 
 def determine_rebound_type(play: pd.Series, pbp_df: pd.DataFrame, last_possession: int):
@@ -67,73 +68,53 @@ def determine_rebound_type(play: pd.Series, pbp_df: pd.DataFrame, last_possessio
     else:
         return False, 0, -1
 
-    # We need to account for missed free throws either containing
+    # We need to account for missed shots either containing
     # a made field-goal (And 1) or prior made free throw(s) by
     # the same player at the same time
     remove_shot = -1
-    if shot["eventmsgtype"] == 3:
-        # Isolate to this possession
-        poss_df = pbp_df[
-            (
-                pbp_df["eventnum"] > last_possession
-            ) &
-            (
-                pbp_df["eventnum"] < rebound_event
-            )
-        ]
+    # Isolate to this possession
+    poss_df = pbp_df[
+        (
+            pbp_df["eventnum"] > last_possession
+        ) &
+        (
+            pbp_df["eventnum"] < rebound_event
+        )
+    ]
 
-        # Identify any made shots by the player at the line
-        made_shot_df = poss_df[
-            (
-                poss_df["eventmsgtype"]==1
-            ) &
-            (
-                poss_df["player1_id"] == shot["player1_id"]
-            )
-        ]
+    # Identify any made shots by the player taking the shot
+    made_shot_df = poss_df[
+        (
+            poss_df["eventmsgtype"]==1
+        ) &
+        (
+            poss_df["player1_id"] == shot["player1_id"]
+        )
+    ]
 
-        # Identify any missed shots by the player at the line. These
-        # are filtered out of consideration for a RAPM-style possession
-        # downstream
-        missed_shot_df = poss_df[
-            (
-                poss_df["eventmsgtype"]==2
-            ) &
-            (
-                poss_df["player1_id"] == shot["player1_id"]
-            )
-        ]
-        if len(made_shot_df) > 0:
-            # We'll take the last made shot on a possession (which should only be one anyway)
-            made_shot = made_shot_df.iloc[-1]
-            if ("3PT" in str(made_shot["homedescription"])) or ("3PT" in str(made_shot["visitordescription"])):
-                points = 3
-            else:
-                points = 2
-            
-            made_free_throw_df = poss_df[
-                (
-                    poss_df["eventmsgtype"]==3
-                ) &
-                (
-                    (
-                        ~poss_df["homedescription"].str.contains("MISS", na=False)
-                    ) &
-                    (
-                        ~poss_df["visitordescription"].str.contains("MISS", na=False)
-                    )
-                )
-            ]
-            points += len(made_free_throw_df)
-            
-            # Remove the made shot from being used as a separate possession
-            # since we're accounting for it here
-            remove_shot = made_shot["eventnum"]
+    # Identify any missed shots by the player who took the shot. These
+    # are filtered out of consideration for a RAPM-style possession
+    # downstream
+    missed_shot_df = poss_df[
+        (
+            poss_df["eventmsgtype"]==2
+        ) &
+        (
+            poss_df["player1_id"] == shot["player1_id"]
+        )
+    ]
+    if len(made_shot_df) > 0:
+        # We'll take the last made shot on a possession (which should only be one anyway)
+        made_shot = made_shot_df.iloc[-1]
+        if ("3PT" in str(made_shot["homedescription"])) or ("3PT" in str(made_shot["visitordescription"])):
+            points = 3
         else:
-            # Need to account for previous made free throws, so
-            # this just tallies non-made free throws and adds the
-            # total to points
-            made_free_throw_df = poss_df[
+            points = 2
+        
+        # Any prior free throw during the possession needs to be added
+        # in the case of a previous trip to the line on this possession
+        # ending on a missed free throw rebounded by the offense
+        made_free_throw_df = poss_df[
             (
                 poss_df["eventmsgtype"]==3
             ) &
@@ -146,15 +127,35 @@ def determine_rebound_type(play: pd.Series, pbp_df: pd.DataFrame, last_possessio
                 )
             )
         ]
-            points = len(made_free_throw_df)
-
-            # Need to account for missed shots and remove those from
-            # identifying the end of possessions that result in free throws
-            if len(missed_shot_df) > 0:
-                missed_shot = missed_shot_df.iloc[-1]
-                remove_shot = missed_shot["eventnum"]
+        points += len(made_free_throw_df)
+        
+        # Remove the made shot from being used as a separate possession
+        # since we're accounting for it here
+        remove_shot = made_shot["eventnum"]
     else:
-        points = 0
+        # Need to account for previous made free throws, so
+        # this just tallies non-made free throws and adds the
+        # total to points
+        made_free_throw_df = poss_df[
+        (
+            poss_df["eventmsgtype"]==3
+        ) &
+        (
+            (
+                ~poss_df["homedescription"].str.contains("MISS", na=False)
+            ) &
+            (
+                ~poss_df["visitordescription"].str.contains("MISS", na=False)
+            )
+        )
+    ]
+        points = len(made_free_throw_df)
+
+        # Need to account for missed shots and remove those from
+        # identifying the end of possessions that result in free throws
+        if len(missed_shot_df) > 0:
+            missed_shot = missed_shot_df.iloc[-1]
+            remove_shot = missed_shot["eventnum"]
 
     # This is a defensive rebound if the rebounding team ID
     # does not equal the offensive team ID
@@ -202,11 +203,13 @@ def determine_scoring_type(play: pd.Series, pbp_df: pd.DataFrame, last_possessio
         ]
     valid_shot = True
     if play["eventmsgtype"] == 1:
+        # Account for the made field goal ending the possession
         if ("3PT" in str(play["homedescription"])) or ("3PT" in str(play["visitordescription"])):
             points = 3
         else:
             points = 2
-        
+
+        # Add any free throws on the possession
         made_free_throw_df = poss_df[
                 (
                     poss_df["eventmsgtype"]==3
@@ -219,6 +222,8 @@ def determine_scoring_type(play: pd.Series, pbp_df: pd.DataFrame, last_possessio
             ]
         points += len(made_free_throw_df)
     else:
+        # Identify all non-missed free throws by the player of interest
+        # that are the last free throws on a trip to the line
         made_free_throw_df = poss_df[
                 (
                     poss_df["eventmsgtype"]==3
@@ -230,9 +235,16 @@ def determine_scoring_type(play: pd.Series, pbp_df: pd.DataFrame, last_possessio
                     (
                         ~poss_df[desc].str.contains("MISS", na=False)
                     )
+                ) &
+                (
+                    (poss_df[desc].str.contains("1 of 1", na=False)) |
+                    (poss_df[desc].str.contains("2 of 2", na=False)) |
+                    (poss_df[desc].str.contains("3 of 3", na=False)) |
+                    (poss_df[desc].str.contains("Free Throw Technical", na=False))
                 )
             ]
         if len(made_free_throw_df) > 0:
+            # Need to account for And-1 situations here
             made_shot_df = poss_df[
                 (
                     poss_df["eventmsgtype"]==1
@@ -242,6 +254,9 @@ def determine_scoring_type(play: pd.Series, pbp_df: pd.DataFrame, last_possessio
                 )
             ]
             if len(made_shot_df) > 0:
+                # Allocate the right points here and remove the
+                # shot from being incorporated elsewhere since we know it's
+                # an And-1 situation
                 made_shot = made_shot_df.iloc[-1]
                 if ("3PT" in str(made_shot[desc])):
                     points = 3
@@ -251,6 +266,8 @@ def determine_scoring_type(play: pd.Series, pbp_df: pd.DataFrame, last_possessio
                 remove_shot = made_shot["eventnum"]
             else:
                 points = 0
+            
+            # Count any made free throws on the possession as well
             made_free_throw_df = poss_df[
                 (
                     poss_df["eventmsgtype"]==3
@@ -263,6 +280,8 @@ def determine_scoring_type(play: pd.Series, pbp_df: pd.DataFrame, last_possessio
             ]
             points += len(made_free_throw_df)
         else:
+            # This is not the last made free throw on a possession
+            # so we will continue
             valid_shot = False
             points = 0
 
@@ -299,21 +318,9 @@ def create_turnover_play(play: pd.Series, home_id: int, visitor_id: int):
         def_prefix = "home_"
         off_id = visitor_id
         def_id = home_id
-    
-    # Initialize play DataFrame with 0 points
-    play_df = pd.DataFrame(
-        {
-            "points": [0],
-            "eventnum": [play["eventnum"]],
-            "offensive_team_id": [off_id],
-            "defensive_team_id": [def_id]
-        }
-    )
 
-    # Loop through to add 
-    for player_number in range(1, 6):
-        play_df["offensive_player_" + str(player_number)] = play[off_prefix + "player_" + str(player_number)]
-        play_df["defensive_player_" + str(player_number)] = play[def_prefix + "player_" + str(player_number)]
+    # Construct RAPM play
+    play_df = utils.construct_rapm_observation(play, 0, off_id, off_prefix, def_id, def_prefix)
 
     return play_df
 
@@ -351,20 +358,8 @@ def create_rebound_play(play: pd.Series, home_id: int, visitor_id: int, points: 
         off_id = home_id
         def_id = visitor_id
     
-    # Initialize play DataFrame with points
-    play_df = pd.DataFrame(
-        {
-            "points": [points],
-            "eventnum": [play["eventnum"]],
-            "offensive_team_id": [off_id],
-            "defensive_team_id": [def_id]
-        }
-    )
-
-    # Loop through to add 
-    for player_number in range(1, 6):
-        play_df["offensive_player_" + str(player_number)] = play[off_prefix + "player_" + str(player_number)]
-        play_df["defensive_player_" + str(player_number)] = play[def_prefix + "player_" + str(player_number)]
+    # Construct RAPM play
+    play_df = utils.construct_rapm_observation(play, points, off_id, off_prefix, def_id, def_prefix)
 
     return play_df
 
@@ -402,20 +397,8 @@ def create_scoring_play(play: pd.Series, home_id: int, visitor_id: int, points: 
         off_id = visitor_id
         def_id = home_id
     
-    # Initialize play DataFrame with points
-    play_df = pd.DataFrame(
-        {
-            "points": [points],
-            "eventnum": [play["eventnum"]],
-            "offensive_team_id": [off_id],
-            "defensive_team_id": [def_id]
-        }
-    )
-
-    # Loop through to add 
-    for player_number in range(1, 6):
-        play_df["offensive_player_" + str(player_number)] = play[off_prefix + "player_" + str(player_number)]
-        play_df["defensive_player_" + str(player_number)] = play[def_prefix + "player_" + str(player_number)]
+    # Construct RAPM play
+    play_df = utils.construct_rapm_observation(play, points, off_id, off_prefix, def_id, def_prefix)
 
     return play_df
 
@@ -457,7 +440,7 @@ def isolate_possessions(pbp_df: pd.DataFrame, game_id: int):
             poss_df = pd.concat([poss_df, play_df])
         # This is a rebound, but only defensive rebounds end
         # possessions, so we need to identify those
-        elif row["eventmsgtype"] == 4:
+        elif row["eventmsgtype"] == 4:    
             def_rebound, points, remove_shot = determine_rebound_type(row, pbp_df, last_possession)
             if def_rebound:
                 play_df = create_rebound_play(row, home_id, visitor_id, points)
